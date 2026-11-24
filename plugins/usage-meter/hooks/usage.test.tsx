@@ -61,6 +61,8 @@ async function seed($: any, on: any) {
       model: 'm',
     },
   })
+
+  return store
 }
 
 test('band on the desktop: summary and a hoverable 30-day strip', async ($, on) => {
@@ -112,4 +114,27 @@ test('/usage-tips report', async ($, on) => {
   expect(r.text).toContain('Chats using the most tokens')
   expect(r.text).toContain('/compact')
   expect(r.text).toContain('5h limit is at 80%')
+})
+
+test('Hide shrinks the bar to one line; Show usage brings it back; the choice is remembered', async ($: any, on: any) => {
+  const store = await seed($, on)
+  const band = () =>
+    $.ui.mount({ plugin: 'usage-meter', component: 'AbovePrompt', surface: 'desktop', props: BAND_PROPS } as never)
+
+  let ui = await band()
+  await ui.press({ key: 'hide' })
+  await ui.unmount()
+
+  ui = await band()
+  expect(await ui.find({ type: 'Text', text: /tok this chat/ })).toBeFalsy()
+  expect((await ui.find({ type: 'Text', text: /ctx 70%/ }))?.text).toBeTruthy()
+  const show = await ui.find({ type: 'Button', key: 'show' })
+  expect(show?.props?.label).toBe('Show usage')
+  expect(store['hidden-v1']).toBe(true)
+  await ui.press({ key: 'show' })
+  await ui.unmount()
+
+  ui = await band()
+  expect((await ui.find({ type: 'Text', text: /tok this chat/ }))?.text).toBeTruthy()
+  await ui.unmount()
 })

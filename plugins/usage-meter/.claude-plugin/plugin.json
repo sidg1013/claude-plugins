@@ -1,6 +1,6 @@
 {
   "name": "usage-meter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Token usage bar above the prompt with a daily usage calendar (hover a day for its tokens), your heaviest chats, and tips to cut usage in /usage",
   "types": "./types/index.d.ts",
   "license": "MIT"

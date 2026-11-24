@@ -28,6 +28,7 @@ const isHidden = atom({ plugin: 'usage-meter', key: 'isHidden' } as const, false
 const PANE = 'usage-meter'
 const CHATS = 'chats-v1'
 const DAYS = 'days-v1'
+const HIDDEN = 'hidden-v1'
 const MAX_CHATS = 200
 const MAX_DAYS = 400
 const DAY_MS = 86400000
@@ -266,6 +267,12 @@ async function refresh($: EngineInterface): Promise<void> {
   }))
 }
 
+/** Hide or show the full bar, here and in chats started after. */
+async function setHidden($: EngineInterface, hidden: boolean): Promise<void> {
+  await update($, isHidden, () => hidden)
+  await $.store.set(HIDDEN, hidden)
+}
+
 async function openPane($: EngineInterface): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Usage' })
 }
@@ -318,6 +325,8 @@ export const register: Register = on => {
     const days = await loadDays($)
     await update($, chatsAtom, () => chats)
     await update($, daysAtom, () => days)
+    const hidden = await $.store.get(HIDDEN)
+    await update($, isHidden, () => hidden === true)
     await refresh($)
 
     return r
@@ -414,15 +423,31 @@ export const register: Register = on => {
 
   // ── the band above the prompt ──────────────────────────────────────────
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey || (await read($, isHidden))) return next(e)
+    if (e.props.hasSurvey) return next(e)
     const l = await read($, live)
+    const ui = $.ui.resolve(e)
+    const { Box, Button, Text } = ui
+    const warn = l.contextPct >= 60
+
+    // Hidden: one short line, with a button to bring the full bar back.
+    if (await read($, isHidden)) {
+      return (
+        <Box>
+          <Text color={ACCENT}>◆ </Text>
+          <Text dimColor>{fmt(total(l))} tok · </Text>
+          <Text color={warn ? 'yellow' : undefined} dimColor={!warn}>
+            ctx {l.contextPct}%
+          </Text>
+          <Text> </Text>
+          <Button key="show" label="Show usage" onPress={() => setHidden($, false)} />
+        </Box>
+      )
+    }
+
     const chats = await read($, chatsAtom)
     const days = await read($, daysAtom)
     const now = await $.clock.now()
     const best = topChats(chats, 1)[0]
-    const ui = $.ui.resolve(e)
-    const { Box, Button, Text } = ui
-    const warn = l.contextPct >= 60
     const limits = l.limits.map(x => `${limitName(x.kind)} ${x.percentUsed}%`).join(' · ')
     const todayTok = days[dayKey(now)]?.tokens ?? 0
     const cells = lastDays(days, now, 30)
@@ -449,7 +474,7 @@ export const register: Register = on => {
         </Text>
         <Button key="open" label="Details" onPress={() => openPane($)} />
         <Text> </Text>
-        <Button key="hide" label="Hide" onPress={() => update($, isHidden, () => true)} />
+        <Button key="hide" label="Hide" onPress={() => setHidden($, true)} />
       </Box>
     )
 
