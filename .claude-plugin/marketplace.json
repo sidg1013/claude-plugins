@@ -1,11 +1,18 @@
 {
   "name": "sidg1013-plugins",
-  "owner": { "name": "sidg1013" },
+  "owner": {
+    "name": "sidg1013"
+  },
   "plugins": [
     {
       "name": "usage-meter",
       "source": "./plugins/usage-meter",
       "description": "Token usage bar with a daily usage calendar, your heaviest chats, and tips to cut usage"
+    },
+    {
+      "name": "prompt-master",
+      "source": "./plugins/prompt-master",
+      "description": "Rewrites a short, vague request into a complete structured prompt before answering it, with a Prompt Master button above the prompt box"
     }
   ]
 }
