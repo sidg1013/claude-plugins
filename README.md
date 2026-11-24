@@ -5,7 +5,7 @@ My Claude Code plugins, mods and skills, all in one marketplace.
 | Plugin | What it does |
 | --- | --- |
 | [usage-meter](plugins/usage-meter) | Token usage bar above the prompt with a daily usage calendar (hover a day for its tokens), your heaviest chats, and tips to cut usage |
-| [prompt-master](plugins/prompt-master) | A Prompt Master button above the prompt box (and `/prompt-master`) that rewrites your next request into a complete, structured prompt before answering it, plus a matching skill |
+| [prompt-master](plugins/prompt-master) | A Prompt Master button above the prompt box (and `/pm`) that rewrites your next request into a complete, structured prompt before answering it, plus a matching skill |
 
 ## Install
 

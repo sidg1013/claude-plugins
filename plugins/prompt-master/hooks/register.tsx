@@ -49,14 +49,20 @@ async function send($: EngineInterface, request: string): Promise<boolean> {
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'prompt-master',
-      description: 'Rewrite your request into a complete prompt before answering it',
-    })
+    // /prompt-master is taken where the Prompt Master skill is on the account,
+    // so the mod's own command is /pm.
+    try {
+      await $.command.register({
+        name: 'pm',
+        description: 'Prompt Master: rewrite your request into a complete prompt before answering it',
+      })
+    } catch {
+      // Already taken: the button still works.
+    }
     return next(e)
   })
 
-  on('command.run', { command: 'prompt-master' }, async ($, e) => {
+  on('command.run', { command: 'pm' }, async ($, e) => {
     if (await send($, e.args)) {
       return { text: 'Prompt Master: rewriting your request first.', isTextDisplayOnly: true }
     }

@@ -5,7 +5,7 @@ Turns a short, vague request into a complete, structured prompt (Role, Task, Con
 ## Use
 
 - **Button:** tap **Prompt Master** above the prompt box. It turns to **Prompt Master: ON**, and the next message you send is rewritten first. Tap again to cancel. (In a terminal, if you've already typed your request, the button sends it straight away.)
-- **Command:** `/prompt-master <what you want>`, or `/prompt-master` alone to turn the button on.
+- **Command:** `/pm <what you want>`, or `/pm` alone to turn the button on.
 - **Skill:** say "Prompt Master: <what you want>" in any chat.
 
 ## Install

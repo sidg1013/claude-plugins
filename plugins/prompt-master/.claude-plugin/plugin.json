@@ -1,6 +1,6 @@
 {
   "name": "prompt-master",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "license": "MIT",
   "description": "Rewrites a short, vague request into a complete structured prompt before answering it: a Prompt Master button above the prompt box, /prompt-master, and a matching skill.",
   "types": "./types/index.d.ts"
