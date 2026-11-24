@@ -31,6 +31,7 @@ declare module 'claude-code' {
       live: Shaped<Live>
       chats: Shaped<Chats>
       days: Shaped<Days>
+      firstPrompt: string
       isHidden: boolean
     }
   }

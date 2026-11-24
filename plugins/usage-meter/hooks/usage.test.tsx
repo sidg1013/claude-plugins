@@ -138,3 +138,14 @@ test('Hide shrinks the bar to one line; Show usage brings it back; the choice is
   expect((await ui.find({ type: 'Text', text: /tok this chat/ }))?.text).toBeTruthy()
   await ui.unmount()
 })
+
+test('the chat is named after its first message, not a later one', async ($: any, on: any) => {
+  const store = await seed($, on)
+  await $.prompt.submit({ text: 'A later message' } as never)
+  await $.turn.complete({
+    answer: 'ok', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer',
+    usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm' },
+  })
+  const chats = store['chats-v1'] as Record<string, { title: string }>
+  expect(chats['sess-1']?.title).toBe('Refactor the billing module')
+})

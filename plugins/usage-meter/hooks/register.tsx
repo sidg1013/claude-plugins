@@ -23,6 +23,8 @@ const chatsAtom = atom({ plugin: 'usage-meter', key: 'chats' } as const, {}, {
 const daysAtom = atom({ plugin: 'usage-meter', key: 'days' } as const, {}, {
   shape: 'days-1',
 })
+// The chat's first message, its name: kept in session state so a reload keeps it.
+const firstPrompt = atom({ plugin: 'usage-meter', key: 'firstPrompt' } as const, '')
 const isHidden = atom({ plugin: 'usage-meter', key: 'isHidden' } as const, false)
 
 const PANE = 'usage-meter'
@@ -313,8 +315,6 @@ async function report($: EngineInterface): Promise<string> {
 }
 
 export const register: Register = on => {
-  let title = ''
-
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     await $.command.register({
@@ -334,7 +334,9 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const t = e.text.trim()
-    if (!title && t && !t.startsWith('/')) title = t.replace(/\s+/g, ' ').slice(0, 50)
+    if (t && !t.startsWith('/') && !(await read($, firstPrompt))) {
+      await update($, firstPrompt, () => t.replace(/\s+/g, ' ').slice(0, 50))
+    }
 
     return next(e)
   })
@@ -366,9 +368,13 @@ export const register: Register = on => {
 
     // Chats: re-read the store so other open chats' numbers are kept.
     const chats = await loadChats($)
+    // A name saved earlier in this chat wins: that was its first message.
+    const saved = chats[id]?.title
+    const title =
+      saved && saved !== 'untitled chat' ? saved : (await read($, firstPrompt)) || 'untitled chat'
     chats[id] = {
       id,
-      title: title || chats[id]?.title || 'untitled chat',
+      title,
       tokens: total(l),
       usd: l.usd,
       turns: l.turns,
