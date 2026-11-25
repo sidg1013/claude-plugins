@@ -1,7 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { ChatRecord, Chats, Days, Live } from '../types'
+import type {
+  ChatRecord,
+  Chats,
+  Days,
+  Live,
+  Remote,
+  Stats,
+  SyncRecord,
+} from '../types'
 
 const EMPTY: Live = {
   input: 0,
@@ -26,6 +34,15 @@ const daysAtom = atom({ plugin: 'usage-meter', key: 'days' } as const, {}, {
 // The chat's first message, its name: kept in session state so a reload keeps it.
 const firstPrompt = atom({ plugin: 'usage-meter', key: 'firstPrompt' } as const, '')
 const isHidden = atom({ plugin: 'usage-meter', key: 'isHidden' } as const, false)
+// This chat's tokens per day: what it syncs.
+const chatDays = atom({ plugin: 'usage-meter', key: 'chatDays' } as const, {}, {
+  shape: 'chat-days-1',
+})
+// Every chat's numbers, read from Google Drive.
+const remote = atom({ plugin: 'usage-meter', key: 'remote' } as const, null, {
+  shape: 'remote-1',
+})
+const syncState = atom({ plugin: 'usage-meter', key: 'syncState' } as const, 'local')
 
 const PANE = 'usage-meter'
 const CHATS = 'chats-v1'
@@ -34,6 +51,15 @@ const HIDDEN = 'hidden-v1'
 const MAX_CHATS = 200
 const MAX_DAYS = 400
 const DAY_MS = 86400000
+
+// Google Drive sync: one small file per chat in one folder; the chat's numbers
+// are the file's description, so a single search reads every chat back.
+const DRIVE_SERVERS = ['Google Drive', 'claude.ai Google Drive']
+const DRIVE_SERVER = 'drive-server-v1'
+const DRIVE_FILES = 'drive-files-v1'
+const FOLDER_TITLE = 'Claude usage-meter'
+const FOLDER_MIME = 'application/vnd.google-apps.folder'
+const READ_EVERY_MS = 5 * 60 * 1000
 
 // Palette: reads on light and dark backgrounds alike.
 const ACCENT = '#d97757'
@@ -90,11 +116,11 @@ const levelOf = (tokens: number, max: number): number => {
 
 type Cell = { key: string; ms: number; tokens: number; chats: number; level: number }
 
-const cellOf = (days: Days, ms: number): Cell => {
+const cellOf = (days: Stats, ms: number): Cell => {
   const key = dayKey(ms)
   const d = days[key]
 
-  return { key, ms, tokens: d?.tokens ?? 0, chats: d?.chats.length ?? 0, level: 0 }
+  return { key, ms, tokens: d?.tokens ?? 0, chats: d?.chats ?? 0, level: 0 }
 }
 
 const leveled = (cells: Cell[]): void => {
@@ -103,7 +129,7 @@ const leveled = (cells: Cell[]): void => {
 }
 
 /** The calendar: `weeks` columns of Sunday→Saturday, ending with today's week. */
-function calendar(days: Days, now: number, weeks: number): Cell[][] {
+function calendar(days: Stats, now: number, weeks: number): Cell[][] {
   const start = now - (new Date(now).getDay() + 7 * (weeks - 1)) * DAY_MS
   const cols: Cell[][] = []
   for (let w = 0; w < weeks; w++) {
@@ -121,7 +147,7 @@ function calendar(days: Days, now: number, weeks: number): Cell[][] {
 }
 
 /** The last `n` days, oldest first. */
-function lastDays(days: Days, now: number, n: number): Cell[] {
+function lastDays(days: Stats, now: number, n: number): Cell[] {
   const cells: Cell[] = []
   for (let i = n - 1; i >= 0; i--) cells.push(cellOf(days, now - i * DAY_MS))
   leveled(cells)
@@ -202,6 +228,179 @@ function stripSvg(cells: Cell[]): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${S + 2}" viewBox="0 0 ${w} ${S + 2}"><style>rect.d:hover{stroke:${INK};stroke-width:1.5}</style>${body}</svg>`
 }
 
+/**
+ * Tokens per day across every chat: Drive's records (this chat's live numbers
+ * in place of its synced ones), and this machine's own days where they are more.
+ */
+function statsOf(local: Days, rem: Remote | null, id: string, mine: Record<string, number>): Stats {
+  const out: Stats = {}
+  if (rem) {
+    for (const [cid, rec] of Object.entries(rem.records)) {
+      const days = cid === id ? mine : rec.days
+      for (const [day, tokens] of Object.entries(days)) {
+        if (!(tokens > 0)) continue
+        const d = out[day] ?? { tokens: 0, chats: 0 }
+        out[day] = { tokens: d.tokens + tokens, chats: d.chats + 1 }
+      }
+    }
+    if (!rem.records[id]) {
+      for (const [day, tokens] of Object.entries(mine)) {
+        if (!(tokens > 0)) continue
+        const d = out[day] ?? { tokens: 0, chats: 0 }
+        out[day] = { tokens: d.tokens + tokens, chats: d.chats + 1 }
+      }
+    }
+  }
+  for (const [day, d] of Object.entries(local)) {
+    const o = out[day]
+    if (!o || d.tokens > o.tokens) out[day] = { tokens: d.tokens, chats: d.chats.length }
+  }
+
+  return out
+}
+
+/** Every chat known here or on Drive, the newer copy of each. */
+function chatsOf(local: Chats, rem: Remote | null): Chats {
+  const out: Chats = { ...local }
+  for (const [id, r] of Object.entries(rem?.records ?? {})) {
+    const have = out[id]
+    if (!have || r.updatedAt > have.updatedAt) {
+      out[id] = { id, title: r.title, tokens: r.tokens, usd: r.usd, turns: r.turns, updatedAt: r.updatedAt }
+    }
+  }
+
+  return out
+}
+
+const textOf = (blocks: readonly { type: string; text?: string }[]): string =>
+  blocks.map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('')
+
+type DriveFile = { id?: string; title?: string; description?: string; parentId?: string }
+type DriveAnswer = { id?: string; files?: DriveFile[]; nextPageToken?: string }
+
+/** Calls a Google Drive connector tool, on whichever Drive server this host has. */
+async function drive($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<DriveAnswer> {
+  const known = await $.store.get(DRIVE_SERVER)
+  const order =
+    typeof known === 'string' ? [known, ...DRIVE_SERVERS.filter(s => s !== known)] : DRIVE_SERVERS
+  let failure: unknown = new Error('Google Drive is not connected')
+  for (const server of order) {
+    try {
+      const r = await $.mcp.call(server, tool, args)
+      const text = textOf(r.content as { type: string; text?: string }[])
+      if (r.isError) throw new Error(text.slice(0, 200) || `${tool} failed`)
+      if (server !== known) await $.store.set(DRIVE_SERVER, server)
+
+      return text ? (JSON.parse(text) as DriveAnswer) : {}
+    } catch (err) {
+      failure = err
+    }
+  }
+  throw failure
+}
+
+const quote = (s: string): string => s.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+
+/** Every 'Claude usage-meter' folder (two chats may each have made one). */
+async function folders($: EngineInterface): Promise<string[]> {
+  const r = await drive($, 'search_files', {
+    query: `title = '${FOLDER_TITLE}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
+    excludeContentSnippets: true,
+    pageSize: 10,
+  })
+
+  return (r.files ?? []).map(f => f.id).filter((x): x is string => !!x).sort()
+}
+
+/** This chat's file on Drive, made on first use. */
+async function chatFile($: EngineInterface, id: string): Promise<string> {
+  const cached = (await $.store.get(DRIVE_FILES)) as Record<string, string> | undefined
+  const files = cached && typeof cached === 'object' ? { ...cached } : {}
+  const hit = files[id]
+  if (hit) return hit
+  const title = `usage-meter chat ${id}`
+  const found = await drive($, 'search_files', {
+    query: `title = '${quote(title)}' and trashed = false`,
+    excludeContentSnippets: true,
+    pageSize: 1,
+  })
+  let fileId = found.files?.[0]?.id
+  if (!fileId) {
+    let folder = (await folders($))[0]
+    if (!folder) {
+      folder = (await drive($, 'create_file', { title: FOLDER_TITLE, contentMimeType: FOLDER_MIME })).id
+    }
+    const made = await drive($, 'create_file', {
+      title,
+      ...(folder ? { parentId: folder } : {}),
+      textContent: 'usage-meter keeps this chat\'s token counts in this file\'s description.',
+      contentMimeType: 'text/plain',
+      disableConversionToGoogleType: true,
+    })
+    fileId = made.id
+  }
+  if (!fileId) throw new Error('Drive made no file')
+  files[id] = fileId
+  const ids = Object.keys(files)
+  for (const old of ids.slice(0, Math.max(0, ids.length - MAX_CHATS))) delete files[old]
+  await $.store.set(DRIVE_FILES, files)
+
+  return fileId
+}
+
+/** Reads every chat's record from Drive into `remote`. */
+async function pull($: EngineInterface, now: number): Promise<void> {
+  const parents = await folders($)
+  const records: Record<string, SyncRecord> = {}
+  if (parents.length > 0) {
+    const inAny = parents.map(f => `parentId = '${quote(f)}'`).join(' or ')
+    let pageToken: string | undefined
+    for (let page = 0; page < 10; page++) {
+      const r = await drive($, 'search_files', {
+        query: `(${inAny}) and trashed = false`,
+        excludeContentSnippets: true,
+        pageSize: 100,
+        ...(pageToken ? { pageToken } : {}),
+      })
+      for (const f of r.files ?? []) {
+        const cid = f.title?.startsWith('usage-meter chat ') ? f.title.slice(17) : ''
+        if (!cid || !f.description) continue
+        try {
+          const rec = JSON.parse(f.description) as SyncRecord
+          if (rec && rec.v === 1 && typeof rec.tokens === 'number' && rec.days) records[cid] = rec
+        } catch {
+          // Not one of ours, or cut short: skip it.
+        }
+      }
+      pageToken = r.nextPageToken
+      if (!pageToken) break
+    }
+  }
+  await update($, remote, () => ({ records, syncedAt: now }))
+}
+
+/** Writes this chat's record to Drive, and reads everyone's when due. */
+async function push($: EngineInterface, id: string, rec: SyncRecord, now: number): Promise<void> {
+  const description = JSON.stringify(rec)
+  let fileId = await chatFile($, id)
+  try {
+    await drive($, 'update_file', { fileId, description })
+  } catch {
+    // The file may have been trashed: forget it and make a new one, once.
+    const cached = ((await $.store.get(DRIVE_FILES)) ?? {}) as Record<string, string>
+    const { [id]: _gone, ...rest } = cached
+    await $.store.set(DRIVE_FILES, rest)
+    fileId = await chatFile($, id)
+    await drive($, 'update_file', { fileId, description })
+  }
+  const rem = await read($, remote)
+  if (!rem || now - rem.syncedAt >= READ_EVERY_MS) {
+    await pull($, now)
+  } else {
+    await update($, remote, r => (r ? { ...r, records: { ...r.records, [id]: rec } } : r))
+  }
+}
+
 function tips(l: Live, chats: Chats): string[] {
   const out: string[] = []
   const t = total(l)
@@ -279,11 +478,24 @@ async function openPane($: EngineInterface): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Usage' })
 }
 
+function syncNote(state: string, rem: Remote | null): string {
+  if (state === 'synced' && rem) {
+    const n = Object.keys(rem.records).length
+    return `Synced with Google Drive: ${n} chat${n === 1 ? '' : 's'} across your machines and cloud chats`
+  }
+  if (state === 'off') return 'This machine only (Drive sync is turned off)'
+
+  return 'This machine only: connect Google Drive to Claude to include every chat'
+}
+
 async function report($: EngineInterface): Promise<string> {
   await refresh($)
   const l = await read($, live)
-  const chats = await read($, chatsAtom)
-  const days = await read($, daysAtom)
+  const rem = await read($, remote)
+  const id = await $.session.id()
+  const chats = chatsOf(await read($, chatsAtom), rem)
+  const days = statsOf(await read($, daysAtom), rem, id, await read($, chatDays))
+  const sync = await read($, syncState)
   const now = await $.clock.now()
   const week = lastDays(days, now, 7).reduce((n, c) => n + c.tokens, 0)
   const lines: string[] = []
@@ -297,6 +509,7 @@ async function report($: EngineInterface): Promise<string> {
   lines.push(`  context window ${l.contextPct}% full`)
   for (const lim of l.limits) lines.push(`  ${limitName(lim.kind)}: ${lim.percentUsed}% used`)
   lines.push(`Today: ${fmt(days[dayKey(now)]?.tokens ?? 0)} tokens · last 7 days: ${fmt(week)}`)
+  lines.push(`  ${syncNote(sync, rem)}`)
   const ranked = topChats(chats, 5)
   if (ranked.length > 0) {
     lines.push('')
@@ -314,7 +527,9 @@ async function report($: EngineInterface): Promise<string> {
   return lines.join('\n')
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isSyncOn = options.driveSync !== false
+
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     await $.command.register({
@@ -328,6 +543,19 @@ export const register: Register = on => {
     const hidden = await $.store.get(HIDDEN)
     await update($, isHidden, () => hidden === true)
     await refresh($)
+    if (!isSyncOn) {
+      await update($, syncState, () => 'off' as const)
+    } else {
+      try {
+        await pull($, await $.clock.now())
+        await update($, syncState, () => 'synced' as const)
+        // A resumed chat picks up its own days where this machine forgot them.
+        const own = (await read($, remote))?.records[await $.session.id()]
+        if (own) await update($, chatDays, d => (Object.keys(d).length > 0 ? d : own.days))
+      } catch {
+        await update($, syncState, () => 'local' as const)
+      }
+    }
 
     return r
   })
@@ -405,6 +633,32 @@ export const register: Register = on => {
     await $.store.set(DAYS, keptDays)
     await update($, daysAtom, () => keptDays)
 
+    // This chat's days, and the sync.
+    await update($, chatDays, d => {
+      const next2 = { ...d, [key]: (d[key] ?? 0) + spent }
+      const keys = Object.keys(next2).sort()
+      for (const k of keys.slice(0, Math.max(0, keys.length - MAX_DAYS))) delete next2[k]
+
+      return next2
+    })
+    if (isSyncOn) {
+      const rec: SyncRecord = {
+        v: 1,
+        title,
+        tokens: total(l),
+        usd: l.usd,
+        turns: l.turns,
+        updatedAt: now,
+        days: await read($, chatDays),
+      }
+      try {
+        await push($, id, rec, now)
+        await update($, syncState, () => 'synced' as const)
+      } catch {
+        await update($, syncState, () => 'local' as const)
+      }
+    }
+
     return r
   })
 
@@ -450,8 +704,10 @@ export const register: Register = on => {
       )
     }
 
-    const chats = await read($, chatsAtom)
-    const days = await read($, daysAtom)
+    const rem = await read($, remote)
+    const id = await $.session.id()
+    const chats = chatsOf(await read($, chatsAtom), rem)
+    const days = statsOf(await read($, daysAtom), rem, id, await read($, chatDays))
     const now = await $.clock.now()
     const best = topChats(chats, 1)[0]
     const limits = l.limits.map(x => `${limitName(x.kind)} ${x.percentUsed}%`).join(' · ')
@@ -529,8 +785,11 @@ export const register: Register = on => {
   // ── the Usage panel: full calendar, top chats, tips ───────────────────
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const l = await read($, live)
-    const chats = await read($, chatsAtom)
-    const days = await read($, daysAtom)
+    const rem = await read($, remote)
+    const id = await $.session.id()
+    const chats = chatsOf(await read($, chatsAtom), rem)
+    const days = statsOf(await read($, daysAtom), rem, id, await read($, chatDays))
+    const sync = await read($, syncState)
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
@@ -610,6 +869,7 @@ export const register: Register = on => {
             {activeDays} active day{activeDays === 1 ? '' : 's'} · today{' '}
             {fmt(days[dayKey(now)]?.tokens ?? 0)}
           </Text>
+          <Text dimColor>{syncNote(sync, rem)}</Text>
         </Box>
         {grid}
         <Box flexDirection="column">

@@ -149,3 +149,90 @@ test('the chat is named after its first message, not a later one', async ($: any
   const chats = store['chats-v1'] as Record<string, { title: string }>
   expect(chats['sess-1']?.title).toBe('Refactor the billing module')
 })
+
+/** A Google Drive connector in memory, answering the calls usage-meter makes. */
+function fakeDrive(on: any, files: Record<string, any>) {
+  let n = 0
+  const ok = (v: unknown) => ({ value: { isError: false, content: [{ type: 'text', text: JSON.stringify(v) }] } })
+  on('mcp.call', (_: unknown, e: { server: string; tool: string; args: any }) => {
+    if (e.server !== 'Google Drive') throw new Error('no such server')
+    const a = e.args
+    if (e.tool === 'create_file') {
+      const id = `f${++n}`
+      files[id] = { id, title: a.title, parentId: a.parentId, mimeType: a.contentMimeType }
+      return ok(files[id])
+    }
+    if (e.tool === 'update_file') {
+      if (!files[a.fileId]) return { value: { isError: true, content: [{ type: 'text', text: 'not found' }] } }
+      files[a.fileId].description = a.description
+      return ok(files[a.fileId])
+    }
+    if (e.tool === 'search_files') {
+      const q: string = a.query
+      const all = Object.values(files)
+      let hits
+      if (q.includes("mimeType = 'application/vnd.google-apps.folder'")) {
+        hits = all.filter(f => f.mimeType === 'application/vnd.google-apps.folder' && f.title === 'Claude usage-meter')
+      } else if (q.startsWith('title = ')) {
+        const t = q.match(/^title = '(.*)' and/)![1]
+        hits = all.filter(f => f.title === t)
+      } else {
+        const parents = [...q.matchAll(/parentId = '([^']+)'/g)].map(m => m[1])
+        hits = all.filter(f => parents.includes(f.parentId))
+      }
+      return ok({ files: hits })
+    }
+    throw new Error(`unexpected tool ${e.tool}`)
+  })
+}
+
+test('syncs through Google Drive: other machines and cloud chats show up', async ($: any, on: any) => {
+  const drive: Record<string, any> = {
+    folder: { id: 'folder', title: 'Claude usage-meter', mimeType: 'application/vnd.google-apps.folder' },
+    a: {
+      id: 'a', title: 'usage-meter chat laptop-1', parentId: 'folder',
+      description: JSON.stringify({ v: 1, title: 'Laptop chat', tokens: 3000000, usd: 2, turns: 9, updatedAt: 5, days: { '2026-11-24': 3000000 } }),
+    },
+    b: {
+      id: 'b', title: 'usage-meter chat cloud-2', parentId: 'folder',
+      description: JSON.stringify({ v: 1, title: 'Cloud chat', tokens: 100000, usd: 1, turns: 2, updatedAt: 6, days: { '2026-11-23': 100000 } }),
+    },
+    junk: { id: 'junk', title: 'notes', parentId: 'folder', description: 'not json' },
+  }
+  fakeDrive(on, drive)
+  await seed($, on)
+
+  // This chat wrote its own record into the folder.
+  const mine = Object.values(drive).find((f: any) => f.title === 'usage-meter chat sess-1')
+  expect(mine?.parentId).toBe('folder')
+  expect(JSON.parse(mine.description).days['2026-11-24']).toBe(56000)
+
+  const r = await $.command.run({ command: 'usage-tips' } as never)
+  expect(r.text).toContain('Laptop chat')
+  expect(r.text).toContain('Synced with Google Drive: 3 chats')
+  // Today: the laptop's 3M plus this chat's 56k.
+  expect(r.text).toContain('Today: 3.1M tokens')
+
+  const ui = await $.ui.mount({
+    plugin: 'usage-meter', component: 'Pane', requestId: 'usage-meter', surface: 'desktop', props: PANE_PROPS,
+  } as never)
+  const svg = await ui.find({ type: 'Svg' })
+  expect(String(svg?.props?.source)).toContain('Tue, Nov 24, 2026 · 3,056,000 tokens · 2 chats')
+  expect(String(svg?.props?.source)).toContain('Mon, Nov 23, 2026 · 100,000 tokens · 1 chat')
+  await ui.unmount()
+})
+
+test('without Drive it falls back to this machine and says so', async ($: any, on: any) => {
+  await seed($, on)
+  const r = await $.command.run({ command: 'usage-tips' } as never)
+  expect(r.text).toContain('This machine only: connect Google Drive')
+})
+
+test('sync can be turned off', { options: { driveSync: false } }, async ($: any, on: any) => {
+  const drive: Record<string, any> = {}
+  fakeDrive(on, drive)
+  await seed($, on)
+  expect(Object.keys(drive)).toHaveLength(0)
+  const r = await $.command.run({ command: 'usage-tips' } as never)
+  expect(r.text).toContain('Drive sync is turned off')
+})
