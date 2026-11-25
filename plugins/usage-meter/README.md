@@ -11,8 +11,18 @@ A Claude Code mod that shows your token usage in every chat.
   26-week calendar of daily usage (hover any day), this chat's token breakdown, the five chats that
   used the most tokens, and suggestions for using fewer tokens.
 
-Costs are local estimates, not your bill. Usage is counted from when the mod is installed, on the
-machine it runs on.
+## Sync across machines and cloud chats
+
+If Google Drive is connected to Claude (claude.ai → Settings → Connectors), each chat keeps its
+token counts in a **Claude usage-meter** folder in that Drive: one small file per chat, with the
+numbers in the file's description. The calendar, today's total and "Chats using the most" then
+cover every chat on every machine and cloud environment, not just the one you're in. Drive calls
+use no Claude tokens. Without Drive, it shows this machine only and says so.
+
+To turn syncing off, set **Sync through Google Drive** to off in the plugin's settings
+(`/plugin` → usage-meter → configure).
+
+Costs are local estimates, not your bill. Usage is counted from when the mod is installed.
 
 ## Install
 

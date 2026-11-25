@@ -1,7 +1,15 @@
 {
   "name": "usage-meter",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Token usage bar above the prompt with a daily usage calendar (hover a day for its tokens), your heaviest chats, and tips to cut usage in /usage",
   "types": "./types/index.d.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "driveSync": {
+      "type": "boolean",
+      "title": "Sync through Google Drive",
+      "description": "Keep each chat's token counts in a 'Claude usage-meter' folder in your connected Google Drive, so the calendar and top chats cover every machine and cloud chat.",
+      "default": true
+    }
+  }
 }
