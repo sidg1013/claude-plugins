@@ -61,6 +61,13 @@ const FOLDER_TITLE = 'Claude usage-meter'
 const FOLDER_MIME = 'application/vnd.google-apps.folder'
 const READ_EVERY_MS = 5 * 60 * 1000
 
+// Prompts a person wrote; the rest (task notices, scheduled tasks, peers) are not.
+const HUMAN_ORIGINS = ['composer', 'bridge', 'sdk', 'unclassified']
+
+/** A real chat name: set, and not a placeholder or a notice caught by mistake. */
+const isName = (s: string | undefined): s is string =>
+  !!s && s !== 'untitled chat' && !s.startsWith('<')
+
 // Palette: reads on light and dark backgrounds alike.
 const ACCENT = '#d97757'
 const LEVELS = ['#8b8b8b33', '#d977574d', '#d9775780', '#d97757bf', '#d97757']
@@ -562,8 +569,13 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     const t = e.text.trim()
-    if (t && !t.startsWith('/') && !(await read($, firstPrompt))) {
-      await update($, firstPrompt, () => t.replace(/\s+/g, ' ').slice(0, 50))
+    // Only what a person typed names the chat: not a slash command, and not a
+    // notice, scheduled task or other session's message (which arrive as prompts).
+    const kind: string | undefined = e.origin?.kind
+    const isPerson = !kind || HUMAN_ORIGINS.includes(kind)
+    if (isPerson && t && !t.startsWith('/') && !t.startsWith('<')) {
+      const cur = await read($, firstPrompt)
+      if (!isName(cur)) await update($, firstPrompt, () => t.replace(/\s+/g, ' ').slice(0, 50))
     }
 
     return next(e)
@@ -598,8 +610,7 @@ export const register: Register = (on, options) => {
     const chats = await loadChats($)
     // A name saved earlier in this chat wins: that was its first message.
     const saved = chats[id]?.title
-    const title =
-      saved && saved !== 'untitled chat' ? saved : (await read($, firstPrompt)) || 'untitled chat'
+    const title = isName(saved) ? saved : (await read($, firstPrompt)) || 'untitled chat'
     chats[id] = {
       id,
       title,

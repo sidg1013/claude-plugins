@@ -236,3 +236,32 @@ test('sync can be turned off', { options: { driveSync: false } }, async ($: any,
   const r = await $.command.run({ command: 'usage-tips' } as never)
   expect(r.text).toContain('Drive sync is turned off')
 })
+
+test('a background notice is not taken as the chat name', async ($: any, on: any) => {
+  const store: Record<string, unknown> = {}
+  on('store.get', (_: unknown, e: { key: string }) => ({ value: store[e.key] }))
+  on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
+    store[e.key] = e.value
+    return { value: undefined }
+  })
+  on('command.register', () => ({ value: { command: 'usage-tips' } }))
+  on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+  on('clock.now', () => ({ value: NOW }))
+  on('session.id', () => ({ value: 's2' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 1, percent: 1 }, rateLimits: [] } }))
+  on('prompt.submit', (_: unknown, e: { text: string }) => ({ text: e.text }))
+  on('turn.complete', () => ({ text: 'ok' }))
+  const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'm' }
+  const turn = (id: string) =>
+    $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: id, reason: 'answer', usage })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: '<task-notification> mods loaded', origin: { kind: 'task-notification' } } as never)
+  await turn('t1')
+  await $.prompt.submit({ text: 'Fix the login page', origin: { kind: 'composer' } } as never)
+  await turn('t2')
+  await $.prompt.submit({ text: 'and the footer', origin: { kind: 'composer' } } as never)
+  await turn('t3')
+
+  expect((store['chats-v1'] as any)['s2'].title).toBe('Fix the login page')
+})
