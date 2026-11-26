@@ -19,6 +19,11 @@ numbers in the file's description. The calendar, today's total and "Chats using 
 cover every chat on every machine and cloud environment, not just the one you're in. Drive calls
 use no Claude tokens. Without Drive, it shows this machine only and says so.
 
+It also keeps a readable **Claude usage report** Google Doc in that folder: totals for today,
+the last 7 and 30 days, a day-by-day table, your heaviest chats and tips. It's rebuilt at most every
+30 minutes and whenever you run `/usage`, and the old copy goes to the trash, so open it from the
+folder (the doc's own link changes each time).
+
 To turn syncing off, set **Sync through Google Drive** to off in the plugin's settings
 (`/plugin` → usage-meter → configure).
 

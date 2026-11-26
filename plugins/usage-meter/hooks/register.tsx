@@ -61,6 +61,13 @@ const FOLDER_TITLE = 'Claude usage-meter'
 const FOLDER_MIME = 'application/vnd.google-apps.folder'
 const READ_EVERY_MS = 5 * 60 * 1000
 
+// The readable report: a Google Doc in the same folder, made anew (Drive's
+// connector can't edit a doc in place) at most every 30 minutes, the old one trashed.
+const REPORT_TITLE = 'Claude usage report'
+const REPORT_AT = 'report-at-v1'
+const REPORT_URL = 'report-url-v1'
+const REPORT_EVERY_MS = 30 * 60 * 1000
+
 // Prompts a person wrote; the rest (task notices, scheduled tasks, peers) are not.
 const HUMAN_ORIGINS = ['composer', 'bridge', 'sdk', 'unclassified']
 
@@ -283,7 +290,7 @@ const textOf = (blocks: readonly { type: string; text?: string }[]): string =>
   blocks.map(b => (b.type === 'text' && typeof b.text === 'string' ? b.text : '')).join('')
 
 type DriveFile = { id?: string; title?: string; description?: string; parentId?: string }
-type DriveAnswer = { id?: string; files?: DriveFile[]; nextPageToken?: string }
+type DriveAnswer = { id?: string; viewUrl?: string; files?: DriveFile[]; nextPageToken?: string }
 
 /** Calls a Google Drive connector tool, on whichever Drive server this host has. */
 async function drive($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<DriveAnswer> {
@@ -403,8 +410,113 @@ async function push($: EngineInterface, id: string, rec: SyncRecord, now: number
   const rem = await read($, remote)
   if (!rem || now - rem.syncedAt >= READ_EVERY_MS) {
     await pull($, now)
+    const at = await $.store.get(REPORT_AT)
+    if (typeof at !== 'number' || now - at >= REPORT_EVERY_MS) await writeReport($, now)
   } else {
     await update($, remote, r => (r ? { ...r, records: { ...r.records, [id]: rec } } : r))
+  }
+}
+
+const stamp = (ms: number): string => {
+  const d = new Date(ms)
+
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
+
+/** The report as HTML, which Drive turns into a Google Doc. */
+function reportHtml(rem: Remote, now: number, l: Live): string {
+  const days = statsOf({}, rem, '', {})
+  const chats = chatsOf({}, rem)
+  const sum = (n: number) => lastDays(days, now, n).reduce((t, c) => t + c.tokens, 0)
+  const recs = Object.values(rem.records)
+  const all = recs.reduce((t, r) => t + r.tokens, 0)
+  const allUsd = recs.reduce((t, r) => t + r.usd, 0)
+  const row = (cells: string[], th = false) =>
+    `<tr>${cells.map(c => (th ? `<th>${c}</th>` : `<td>${c}</td>`)).join('')}</tr>`
+  const month = lastDays(days, now, 30).reverse()
+  const max = month.reduce((m, c) => Math.max(m, c.tokens), 0)
+  const bar = (t: number) =>
+    t > 0
+      ? `<span style="color:${ACCENT}">${'█'.repeat(Math.max(1, Math.round((t / max) * 20)))}</span>`
+      : ''
+  const parts: string[] = []
+  parts.push('<h1>Claude usage</h1>')
+  parts.push(
+    `<p>Updated ${stamp(now)} · ${recs.length} chat${recs.length === 1 ? '' : 's'} synced from every machine and cloud chat. Dollar figures are estimates at API prices, not your bill.</p>`,
+  )
+  parts.push('<h2>Summary</h2><table border="1">')
+  parts.push(row(['', 'Tokens'], true))
+  parts.push(row(['Today', commas(days[dayKey(now)]?.tokens ?? 0)]))
+  parts.push(row(['Last 7 days', commas(sum(7))]))
+  parts.push(row(['Last 30 days', commas(sum(30))]))
+  parts.push(row(['All synced chats', `${commas(all)} (~$${allUsd.toFixed(2)})`]))
+  for (const x of l.limits) parts.push(row([limitName(x.kind), `${x.percentUsed}% used`]))
+  parts.push('</table>')
+  parts.push('<h2>Last 30 days</h2><table border="1">')
+  parts.push(row(['Day', 'Tokens', 'Chats', ''], true))
+  for (const c of month) {
+    parts.push(
+      row([
+        esc(prettyDay(c.ms)),
+        c.tokens ? commas(c.tokens) : '–',
+        c.chats ? `${c.chats}` : '',
+        bar(c.tokens),
+      ]),
+    )
+  }
+  parts.push('</table>')
+  parts.push('<h2>Chats using the most</h2><table border="1">')
+  parts.push(row(['Chat', 'Tokens', 'Est. cost', 'Turns', 'Last active'], true))
+  for (const c of topChats(chats, 15)) {
+    parts.push(
+      row([esc(c.title), commas(c.tokens), `$${c.usd.toFixed(2)}`, `${c.turns}`, stamp(c.updatedAt)]),
+    )
+  }
+  parts.push('</table>')
+  parts.push('<h2>Ways to cut usage</h2><ul>')
+  for (const t of tips({ ...EMPTY, limits: l.limits }, chats)) parts.push(`<li>${esc(t)}</li>`)
+  parts.push('</ul>')
+
+  return `<html><body>${parts.join('')}</body></html>`
+}
+
+/** Makes a fresh report doc in the folder and moves the older ones to the trash. */
+async function writeReport($: EngineInterface, now: number): Promise<void> {
+  const rem = await read($, remote)
+  const folder = (await folders($))[0]
+  if (!rem || !folder) return
+  const made = await drive($, 'create_file', {
+    title: REPORT_TITLE,
+    parentId: folder,
+    textContent: reportHtml(rem, now, await read($, live)),
+    contentMimeType: 'text/html',
+  })
+  const old = await drive($, 'search_files', {
+    query: `title = '${REPORT_TITLE}' and trashed = false`,
+    excludeContentSnippets: true,
+    pageSize: 20,
+  })
+  for (const f of old.files ?? []) {
+    if (f.id && f.id !== made.id) {
+      await drive($, 'trash_file', { fileId: f.id }).catch(() => undefined)
+    }
+  }
+  await $.store.set(REPORT_AT, now)
+  if (made.viewUrl) await $.store.set(REPORT_URL, made.viewUrl)
+}
+
+/** /usage and /usage-tips: read everyone's numbers and refresh the doc now. */
+async function freshReport($: EngineInterface): Promise<string> {
+  try {
+    const now = await $.clock.now()
+    await pull($, now)
+    await writeReport($, now)
+    await update($, syncState, () => 'synced' as const)
+    const url = await $.store.get(REPORT_URL)
+
+    return typeof url === 'string' ? `Readable report (Google Doc): ${url}` : ''
+  } catch {
+    return ''
   }
 }
 
@@ -676,7 +788,10 @@ export const register: Register = (on, options) => {
   // /usage: the built-in output, our report, and the calendar panel.
   on('command.run', { command: 'usage' }, async ($, e, next) => {
     await openPane($).catch(() => undefined)
-    const ours = await report($).catch(() => 'Usage meter: report unavailable right now.')
+    const doc = isSyncOn ? await freshReport($) : ''
+    const ours =
+      (await report($).catch(() => 'Usage meter: report unavailable right now.')) +
+      (doc ? `\n${doc}` : '')
     try {
       const r = await next(e)
 
@@ -688,8 +803,9 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'usage-tips' }, async $ => {
     await openPane($).catch(() => undefined)
+    const doc = isSyncOn ? await freshReport($) : ''
 
-    return { text: await report($), isTextDisplayOnly: true as const }
+    return { text: (await report($)) + (doc ? `\n${doc}` : ''), isTextDisplayOnly: true as const }
   })
 
   // ── the band above the prompt ──────────────────────────────────────────

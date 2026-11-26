@@ -159,8 +159,12 @@ function fakeDrive(on: any, files: Record<string, any>) {
     const a = e.args
     if (e.tool === 'create_file') {
       const id = `f${++n}`
-      files[id] = { id, title: a.title, parentId: a.parentId, mimeType: a.contentMimeType }
+      files[id] = { id, title: a.title, parentId: a.parentId, mimeType: a.contentMimeType, text: a.textContent, viewUrl: `https://docs/${id}` }
       return ok(files[id])
+    }
+    if (e.tool === 'trash_file') {
+      if (files[a.fileId]) files[a.fileId].trashed = true
+      return ok({})
     }
     if (e.tool === 'update_file') {
       if (!files[a.fileId]) return { value: { isError: true, content: [{ type: 'text', text: 'not found' }] } }
@@ -175,7 +179,7 @@ function fakeDrive(on: any, files: Record<string, any>) {
         hits = all.filter(f => f.mimeType === 'application/vnd.google-apps.folder' && f.title === 'Claude usage-meter')
       } else if (q.startsWith('title = ')) {
         const t = q.match(/^title = '(.*)' and/)![1]
-        hits = all.filter(f => f.title === t)
+        hits = all.filter(f => f.title === t && !f.trashed)
       } else {
         const parents = [...q.matchAll(/parentId = '([^']+)'/g)].map(m => m[1])
         hits = all.filter(f => parents.includes(f.parentId))
@@ -264,4 +268,31 @@ test('a background notice is not taken as the chat name', async ($: any, on: any
   await turn('t3')
 
   expect((store['chats-v1'] as any)['s2'].title).toBe('Fix the login page')
+})
+
+test('keeps a readable Google Doc report in the folder, replacing the old one', async ($: any, on: any) => {
+  const drive: Record<string, any> = {
+    folder: { id: 'folder', title: 'Claude usage-meter', mimeType: 'application/vnd.google-apps.folder' },
+    a: {
+      id: 'a', title: 'usage-meter chat laptop-1', parentId: 'folder',
+      description: JSON.stringify({ v: 1, title: 'Laptop <chat>', tokens: 3000000, usd: 2, turns: 9, updatedAt: 5, days: { '2026-11-24': 3000000 } }),
+    },
+    old: { id: 'old', title: 'Claude usage report', parentId: 'folder' },
+  }
+  fakeDrive(on, drive)
+  await seed($, on)
+  const r = await $.command.run({ command: 'usage-tips' } as never)
+
+  const docs = Object.values(drive).filter((f: any) => f.title === 'Claude usage report')
+  const live = docs.filter((f: any) => !f.trashed)
+  expect(live).toHaveLength(1)
+  expect(drive.old.trashed).toBe(true)
+  const doc = live[0]
+  expect(doc.parentId).toBe('folder')
+  expect(doc.mimeType).toBe('text/html')
+  expect(doc.text).toContain('<h1>Claude usage</h1>')
+  expect(doc.text).toContain('Laptop &lt;chat&gt;')
+  expect(doc.text).toContain('3,056,000')
+  expect(doc.text).toContain('5h limit')
+  expect(r.text).toContain(`Readable report (Google Doc): https://docs/${doc.id}`)
 })
